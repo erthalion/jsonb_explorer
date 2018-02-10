@@ -84,12 +84,19 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 		   ((type = JsonbIteratorNext(&it, &v, false)) != WJB_DONE))
 	{
 		redo_switch = false;
+		if (pending_indent)
+		{
+			add_indent(out, false, level);
+			pending_indent = false;
+		}
+
 		switch (type)
 		{
 			case WJB_BEGIN_ARRAY:
+				array_index = 1;
 				appendStringInfo(out, " [%d elements]", v.val.array.nElems);
 
-				if (!first)
+				/*if (!first)*/
 					/*appendBinaryStringInfo(out, ", ", ispaces);*/
 
 				if (!v.val.array.rawScalar)
@@ -101,12 +108,18 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 					raw_scalar = true;
 
 				first = true;
+				pending_indent = true;
+				level++;
 				break;
 			case WJB_BEGIN_OBJECT:
-				if (!first)
+				/*if (!first)*/
 					/*appendBinaryStringInfo(out, ", ", ispaces);*/
 
-				add_indent(out, use_indent && !last_was_key, level);
+				if (array_index != 0)
+				{
+					add_indent(out, use_indent && !last_was_key, level);
+					appendStringInfo(out, "# %d", array_index);
+				}
 
 				first = true;
 				level++;
@@ -114,12 +127,6 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 			case WJB_KEY:
 				if (first)
 					add_indent(out, false, level);
-
-				if (pending_indent)
-				{
-					add_indent(out, false, level);
-					pending_indent = false;
-				}
 
 				first = true;
 
@@ -146,18 +153,19 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 				}
 				break;
 			case WJB_ELEM:
+				/*ereport(INFO, (errmsg("ELEMENT")));*/
 				array_index += 1;
 
-				if (!first)
+				/*if (!first)*/
 					/*appendBinaryStringInfo(out, ", ", ispaces);*/
 				first = false;
 
-				if (!raw_scalar)
+				/*if (!raw_scalar)*/
 					/*add_indent(out, use_indent, level);*/
 
 				break;
 			case WJB_END_ARRAY:
-				/*level--;*/
+				level--;
 				array_index = 0;
 				if (!raw_scalar)
 				{
