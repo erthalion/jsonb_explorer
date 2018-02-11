@@ -8,18 +8,41 @@
 
 #include "jsonb_explorer.h"
 
-static void
-add_indent(StringInfo out, bool attach, int level)
+#define ARRAY_SIZE 3
+
+typedef struct ArrayLevel
 {
-	int			i;
+	int index;
+	int nElems;
+} ArrayLevel;
+
+typedef enum AttachOptions
+{
+	ATTACH = 0,
+	NOT_ATTACH,
+	SKIP
+} AttachOptions;
+
+static void
+add_indent(StringInfo out, AttachOptions attach, int level, ArrayLevel *array_index)
+{
+	int	 i;
+	char *array_level;
 
 	appendStringInfoCharMacro(out, '\n');
 	for (i = 0; i < level - 1; i++)
-		appendBinaryStringInfo(out, "|   ", 4);
+	{
+		if (array_index[i].index != 0 || (array_index[i + 1].index != 0 && array_index[i + 1].index == array_index[i + 1].nElems + 1))
+			array_level = "    ";
+		else
+			array_level = "|   ";
+		appendBinaryStringInfo(out, array_level, 4);
+	}
 
-	if (attach)
+	if (attach == ATTACH)
 		appendBinaryStringInfo(out, "|---", 4);
-	else
+
+	if (attach == NOT_ATTACH)
 		appendBinaryStringInfo(out, "|   ", 4);
 }
 
@@ -58,20 +81,11 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 	JsonbValue	v;
 	JsonbIteratorToken type = WJB_DONE;
 	int			level = 0;
-	int			array_index = 0;
+	int			array_index_size = ARRAY_SIZE;
+	ArrayLevel	*array_index = palloc0(array_index_size * sizeof(ArrayLevel));
+
 	bool		redo_switch = false;
-	bool		indent = true;
-
-	/* If we are indenting, don't add a space after a comma */
-	int			ispaces = indent ? 1 : 2;
-
-	/*
-	 * Don't indent the very first item. This gets set to the indent flag at
-	 * the bottom of the loop.
-	 */
-	bool		use_indent = false;
-	bool		raw_scalar = false;
-	bool		last_was_key = false;
+	int			j;
 
 	if (out == NULL)
 		out = makeStringInfo();
@@ -86,39 +100,38 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 		redo_switch = false;
 		if (pending_indent)
 		{
-			add_indent(out, false, level);
+			add_indent(out, NOT_ATTACH, level, array_index);
 			pending_indent = false;
 		}
 
 		switch (type)
 		{
 			case WJB_BEGIN_ARRAY:
-				array_index = 1;
 				appendStringInfo(out, " [%d elements]", v.val.array.nElems);
-
-				/*if (!first)*/
-					/*appendBinaryStringInfo(out, ", ", ispaces);*/
-
-				if (!v.val.array.rawScalar)
-				{
-					/*add_indent(out, use_indent && !last_was_key, level);*/
-					/*appendStringInfoCharMacro(out, '[');*/
-				}
-				else
-					raw_scalar = true;
-
 				first = true;
 				pending_indent = true;
 				level++;
+
+				if (level >= array_index_size)
+				{
+					array_index_size *= 2;
+					array_index = repalloc(array_index, array_index_size * sizeof(ArrayLevel));
+					for (j = array_index_size / 2; j < array_index_size; j++)
+					{
+						array_index[j].index = 0;
+						array_index[j].nElems = 0;
+					}
+				}
+
+				array_index[level].index = 1;
+				array_index[level].nElems = v.val.array.nElems;
 				break;
 			case WJB_BEGIN_OBJECT:
-				/*if (!first)*/
-					/*appendBinaryStringInfo(out, ", ", ispaces);*/
-
-				if (array_index != 0)
+				if (array_index[level].index != 0)
 				{
-					add_indent(out, use_indent && !last_was_key, level);
-					appendStringInfo(out, "# %d", array_index);
+					add_indent(out, ATTACH, level, array_index);
+					appendStringInfo(out, "# %d", array_index[level].index);
+					array_index[level].index += 1;
 				}
 
 				first = true;
@@ -126,11 +139,11 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 				break;
 			case WJB_KEY:
 				if (first)
-					add_indent(out, false, level);
+					add_indent(out, NOT_ATTACH, level, array_index);
 
 				first = true;
 
-				add_indent(out, use_indent, level);
+				add_indent(out, ATTACH, level, array_index);
 
 				/* json rules guarantee this is a string */
 				jsonb_put_escaped_value(out, &v);
@@ -153,37 +166,27 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 				}
 				break;
 			case WJB_ELEM:
-				/*ereport(INFO, (errmsg("ELEMENT")));*/
-				array_index += 1;
+				array_index[level].index += 1;
 
-				/*if (!first)*/
-					/*appendBinaryStringInfo(out, ", ", ispaces);*/
 				first = false;
-
-				/*if (!raw_scalar)*/
-					/*add_indent(out, use_indent, level);*/
 
 				break;
 			case WJB_END_ARRAY:
+				add_indent(out, SKIP, level, array_index);
 				level--;
-				array_index = 0;
-				if (!raw_scalar)
-				{
-					/*add_indent(out, use_indent, level);*/
-					/*appendStringInfoCharMacro(out, ']');*/
-				}
 				first = false;
 				break;
 			case WJB_END_OBJECT:
 				level--;
-				pending_indent = true;
+
+				if (array_index[level].index == 0)
+					pending_indent = true;
+
 				first = false;
 				break;
 			default:
 				elog(ERROR, "unknown jsonb iterator token type");
 		}
-		use_indent = indent;
-		last_was_key = redo_switch;
 	}
 
 	Assert(level == 0);
