@@ -109,7 +109,10 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 			case WJB_BEGIN_ARRAY:
 				appendStringInfo(out, " [%d elements]", v.val.array.nElems);
 				first = true;
-				pending_indent = true;
+
+				if (v.val.array.nElems > 0)
+					pending_indent = true;
+
 				level++;
 
 				if (level >= array_index_size)
@@ -183,7 +186,9 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 
 				break;
 			case WJB_END_ARRAY:
-				add_indent(out, SKIP, level, array_index);
+				if (v.val.array.nElems > 0)
+					add_indent(out, SKIP, level, array_index);
+
 				level--;
 				first = false;
 				break;
