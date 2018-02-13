@@ -136,6 +136,17 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 
 				first = true;
 				level++;
+				if (level >= array_index_size)
+				{
+					array_index_size *= 2;
+					array_index = repalloc(array_index, array_index_size * sizeof(ArrayLevel));
+					for (j = array_index_size / 2; j < array_index_size; j++)
+					{
+						array_index[j].index = 0;
+						array_index[j].nElems = 0;
+					}
+				}
+
 				break;
 			case WJB_KEY:
 				if (first)
