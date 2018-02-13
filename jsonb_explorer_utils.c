@@ -35,15 +35,55 @@ add_indent(StringInfo out, AttachOptions attach, int level, ArrayLevel *array_in
 		if (array_index[i].index != 0 || (array_index[i + 1].index != 0 && array_index[i + 1].index == array_index[i + 1].nElems + 1))
 			array_level = "    ";
 		else
-			array_level = "|   ";
+			array_level = "│   ";
 		appendBinaryStringInfo(out, array_level, 4);
 	}
 
 	if (attach == ATTACH)
-		appendBinaryStringInfo(out, "|---", 4);
+		appendBinaryStringInfo(out, "├── ", 10);
 
 	if (attach == NOT_ATTACH)
-		appendBinaryStringInfo(out, "|   ", 4);
+		appendBinaryStringInfo(out, "│   ", 4);
+}
+
+static void
+escape_json_key(StringInfo buf, const char *str)
+{
+	const char *p;
+
+	for (p = str; *p; p++)
+	{
+		switch (*p)
+		{
+			case '\b':
+				appendStringInfoString(buf, "\\b");
+				break;
+			case '\f':
+				appendStringInfoString(buf, "\\f");
+				break;
+			case '\n':
+				appendStringInfoString(buf, "\\n");
+				break;
+			case '\r':
+				appendStringInfoString(buf, "\\r");
+				break;
+			case '\t':
+				appendStringInfoString(buf, "\\t");
+				break;
+			case '"':
+				appendStringInfoString(buf, "\\\"");
+				break;
+			case '\\':
+				appendStringInfoString(buf, "\\\\");
+				break;
+			default:
+				if ((unsigned char) *p < ' ')
+					appendStringInfo(buf, "\\u%04x", (int) *p);
+				else
+					appendStringInfoCharMacro(buf, *p);
+				break;
+		}
+	}
 }
 
 static void
@@ -55,7 +95,7 @@ jsonb_put_escaped_value(StringInfo out, JsonbValue *scalarVal)
 			appendBinaryStringInfo(out, "null", 4);
 			break;
 		case jbvString:
-			escape_json(out, pnstrdup(scalarVal->val.string.val, scalarVal->val.string.len));
+			escape_json_key(out, pnstrdup(scalarVal->val.string.val, scalarVal->val.string.len));
 			break;
 		case jbvNumeric:
 			appendStringInfoString(out,
