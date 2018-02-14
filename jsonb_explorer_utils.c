@@ -10,10 +10,14 @@
 
 #define ARRAY_SIZE 3
 
+#define ARRAY_TYPE 1
+#define OBJECT_TYPE 2
+
 typedef struct ArrayLevel
 {
 	int index;
-	int nElems;
+	int length;
+	int type;
 } ArrayLevel;
 
 typedef enum AttachOptions
@@ -32,7 +36,7 @@ add_indent(StringInfo out, AttachOptions attach, int level, ArrayLevel *array_in
 	appendStringInfoCharMacro(out, '\n');
 	for (i = 0; i < level - 1; i++)
 	{
-		if (array_index[i].index != 0 || (array_index[i + 1].index != 0 && array_index[i + 1].index == array_index[i + 1].nElems + 1))
+		if ((array_index[i].type == ARRAY_TYPE && array_index[i].index != 0) || (array_index[i + 1].index != 0 && array_index[i + 1].index == array_index[i + 1].length + 1))
 			array_level = "    ";
 		else
 			array_level = "│   ";
@@ -162,18 +166,20 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 					for (j = array_index_size / 2; j < array_index_size; j++)
 					{
 						array_index[j].index = 0;
-						array_index[j].nElems = 0;
+						array_index[j].length = 0;
+						array_index[j].type = 0;
 					}
 				}
 
 				array_index[level].index = 1;
-				array_index[level].nElems = v.val.array.nElems;
+				array_index[level].length = v.val.array.nElems;
+				array_index[level].type = ARRAY_TYPE;
 				break;
 			case WJB_BEGIN_OBJECT:
-				if (array_index[level].index != 0)
+				if (array_index[level - 1].index != 0 && array_index[level - 1].type == ARRAY_TYPE)
 				{
 					add_indent(out, ATTACH, level, array_index);
-					appendStringInfo(out, "# %d", array_index[level].index);
+					appendStringInfo(out, "# %d", array_index[level - 1].index);
 					array_index[level].index += 1;
 				}
 
@@ -186,12 +192,19 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 					for (j = array_index_size / 2; j < array_index_size; j++)
 					{
 						array_index[j].index = 0;
-						array_index[j].nElems = 0;
+						array_index[j].length = 0;
+						array_index[j].type = 0;
 					}
 				}
 
+				array_index[level].index = 1;
+				array_index[level].length = v.val.object.nPairs;
+				array_index[level].type = OBJECT_TYPE;
+
 				break;
 			case WJB_KEY:
+				array_index[level].index += 1;
+
 				if (first)
 					add_indent(out, NOT_ATTACH, level, array_index);
 
