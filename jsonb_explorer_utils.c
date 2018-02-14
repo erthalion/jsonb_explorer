@@ -43,7 +43,10 @@ add_indent(StringInfo out, AttachOptions attach, int level, ArrayLevel *array_in
 		appendBinaryStringInfo(out, array_level, 4);
 	}
 
-	if (attach == ATTACH)
+	if (attach == ATTACH && array_index[level].index == array_index[level].length + 1)
+		appendBinaryStringInfo(out, "└── ", 10);
+
+	if (attach == ATTACH && array_index[level].index != array_index[level].length + 1)
 		appendBinaryStringInfo(out, "├── ", 10);
 
 	if (attach == NOT_ATTACH)
