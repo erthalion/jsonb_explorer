@@ -18,6 +18,7 @@ typedef struct ArrayLevel
 	int index;
 	int length;
 	int type;
+	int	elem_number;
 } ArrayLevel;
 
 typedef enum AttachOptions
@@ -31,22 +32,32 @@ static void
 add_indent(StringInfo out, AttachOptions attach, int level, ArrayLevel *array_index)
 {
 	int	 i;
-	char *array_level;
+	ArrayLevel last = array_index[level];
 
 	appendStringInfoCharMacro(out, '\n');
 	for (i = 0; i < level - 1; i++)
 	{
-		if ((array_index[i].type == ARRAY_TYPE && array_index[i].index != 0) || (array_index[i + 1].index != 0 && array_index[i + 1].index == array_index[i + 1].length + 1))
+		char *array_level;
+		ArrayLevel current = array_index[i], next = array_index[i + 1];
+		bool is_array = current.type == ARRAY_TYPE;
+		bool next_is_array = next.type = ARRAY_TYPE;
+		bool next_is_last = next.index == next.length + 1;
+
+		if ((is_array && current.index != 0) || (next.index != 0 && next_is_last) || (next_is_array && next.index == (next.length - next.elem_number) + 1))
+		/*if ((is_array && current.index != 0) || (next.index != 0 && next_is_last))*/
 			array_level = "    ";
 		else
 			array_level = "│   ";
 		appendBinaryStringInfo(out, array_level, 4);
 	}
 
-	if (attach == ATTACH && array_index[level].index == array_index[level].length + 1)
+	if (attach == ATTACH && last.index == last.length + 1)
 		appendBinaryStringInfo(out, "└── ", 10);
 
-	if (attach == ATTACH && array_index[level].index != array_index[level].length + 1)
+
+	if (attach == ATTACH && last.type == ARRAY_TYPE && last.index == (last.length - last.elem_number))
+		appendBinaryStringInfo(out, "└── ", 10);
+	else if (attach == ATTACH && last.index != last.length + 1)
 		appendBinaryStringInfo(out, "├── ", 10);
 
 	if (attach == NOT_ATTACH)
@@ -124,10 +135,12 @@ char *
 JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 {
 	bool		first = true, pending_indent = false;
-	JsonbIterator *it;
-	JsonbValue	v;
-	JsonbIteratorToken type = WJB_DONE;
+	JsonbIterator *it, *forward_it;
+	JsonbValue	v, forward_v;
+	JsonbIteratorToken type = WJB_DONE, forward_type = WJB_DONE;
 	int			level = 0;
+	int			nested_level = 0;
+	int			elem_number = 0;
 	int			array_index_size = ARRAY_SIZE;
 	ArrayLevel	*array_index = palloc0(array_index_size * sizeof(ArrayLevel));
 
@@ -140,6 +153,7 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 	enlargeStringInfo(out, (estimated_len >= 0) ? estimated_len : 64);
 
 	it = JsonbIteratorInit(in);
+	forward_it = palloc(sizeof(JsonbIterator));
 
 	while (redo_switch ||
 		   ((type = JsonbIteratorNext(&it, &v, false)) != WJB_DONE))
@@ -154,11 +168,33 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 		switch (type)
 		{
 			case WJB_BEGIN_ARRAY:
+
+				memcpy(forward_it, it, sizeof(JsonbIterator));
+				forward_it->parent = palloc(sizeof(JsonbIterator));
+				memcpy(forward_it->parent, it->parent, sizeof(JsonbIterator));
+				forward_v = v;
+
+				elem_number = 0;
+				while (!((forward_type = JsonbIteratorNext(&forward_it, &forward_v, false)) == WJB_END_ARRAY && nested_level == 0))
+				{
+					if (forward_type == WJB_BEGIN_OBJECT || forward_type == WJB_BEGIN_ARRAY)
+						nested_level += 1;
+
+					if (forward_type == WJB_END_OBJECT || forward_type == WJB_END_ARRAY)
+					{
+						nested_level -= 1;
+						elem_number = 0;
+					}
+
+					if (forward_type == WJB_ELEM && nested_level == 0)
+						elem_number += 1;
+				}
+
 				appendStringInfo(out, " [%d elements]", v.val.array.nElems);
 				first = true;
 
-				if (v.val.array.nElems > 0)
-					pending_indent = true;
+				/*if (v.val.array.nElems > 0)*/
+					/*pending_indent = true;*/
 
 				level++;
 
@@ -171,18 +207,21 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 						array_index[j].index = 0;
 						array_index[j].length = 0;
 						array_index[j].type = 0;
+						array_index[j].elem_number = 0;
 					}
 				}
 
 				array_index[level].index = 1;
 				array_index[level].length = v.val.array.nElems;
 				array_index[level].type = ARRAY_TYPE;
+				array_index[level].elem_number = elem_number;
 				break;
 			case WJB_BEGIN_OBJECT:
-				if (array_index[level - 1].index != 0 && array_index[level - 1].type == ARRAY_TYPE)
+				if (array_index[level].index != 0 && array_index[level].type == ARRAY_TYPE)
 				{
+					add_indent(out, NOT_ATTACH, level, array_index);
 					add_indent(out, ATTACH, level, array_index);
-					appendStringInfo(out, "# %d", array_index[level - 1].index);
+					appendStringInfo(out, "# %d", array_index[level].index);
 					array_index[level].index += 1;
 				}
 
@@ -197,6 +236,7 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 						array_index[j].index = 0;
 						array_index[j].length = 0;
 						array_index[j].type = 0;
+						array_index[j].elem_number = 0;
 					}
 				}
 
