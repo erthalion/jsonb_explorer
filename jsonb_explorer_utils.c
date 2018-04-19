@@ -13,13 +13,13 @@
 #define ARRAY_TYPE 1
 #define OBJECT_TYPE 2
 
-typedef struct ArrayLevel
+typedef struct IndentInfo
 {
 	int index;
 	int length;
 	int type;
 	int	elem_number;
-} ArrayLevel;
+} IndentInfo;
 
 typedef enum AttachOptions
 {
@@ -29,41 +29,76 @@ typedef enum AttachOptions
 } AttachOptions;
 
 static void
-add_indent(StringInfo out, AttachOptions attach, int level, ArrayLevel *array_index)
+add_indent(StringInfo out, AttachOptions attach, int level, IndentInfo *indent_infos)
 {
 	int	 i;
-	ArrayLevel last = array_index[level];
+	IndentInfo last = indent_infos[level];
 
 	appendStringInfoCharMacro(out, '\n');
+
 	for (i = 0; i < level - 1; i++)
 	{
-		char *array_level;
-		ArrayLevel current = array_index[i], next = array_index[i + 1];
-		bool is_array = current.type == ARRAY_TYPE;
-		bool next_is_array = next.type = ARRAY_TYPE;
-		bool next_is_last = next.index == next.length + 1;
+		IndentInfo current = indent_infos[i],
+				   next = indent_infos[i + 1];
+		bool is_array = (current.type == ARRAY_TYPE);
+		bool next_is_array = (next.type == ARRAY_TYPE);
+		bool next_is_last = (next.index == next.length + 1);
 
-		if ((is_array && current.index != 0) || (next.index != 0 && next_is_last) || (next_is_array && next.index == (next.length - next.elem_number) + 1))
-		/*if ((is_array && current.index != 0) || (next.index != 0 && next_is_last))*/
-			array_level = "    ";
-		else
-			array_level = "│   ";
-		appendBinaryStringInfo(out, array_level, 4);
+		// don't leave a dangling connection for array items, only for objects
+		// inside arrays (it's handled on separate indent levels)
+		if (is_array && current.index != 0)
+		{
+			appendBinaryStringInfo(out, "    ", 4);
+			continue;
+		}
+
+		// don't leave a dangling connection at the end
+		if (next.index != 0 && next_is_last)
+		{
+			appendBinaryStringInfo(out, "    ", 4);
+			continue;
+		}
+
+		// don't leave a dangling connection if we'll return to an array and it
+		// was the last element
+		if (next_is_array && next.index == (next.length - next.elem_number) + 1)
+		{
+			appendBinaryStringInfo(out, "    ", 4);
+			continue;
+		}
+
+		appendBinaryStringInfo(out, "│   ", 4);
 	}
 
+	// close last item if told so
 	if (attach == ATTACH && last.index == last.length + 1)
+	{
 		appendBinaryStringInfo(out, "└── ", 10);
+		return;
+	}
 
-
+	// close last item if it was the last object item in an array
 	if (attach == ATTACH && last.type == ARRAY_TYPE && last.index == (last.length - last.elem_number))
+	{
 		appendBinaryStringInfo(out, "└── ", 10);
-	else if (attach == ATTACH && last.index != last.length + 1)
+		return;
+	}
+
+	// leave connection to the next element
+	if (attach == ATTACH && last.index != last.length + 1)
+	{
 		appendBinaryStringInfo(out, "├── ", 10);
+		return;
+	}
 
 	if (attach == NOT_ATTACH)
+	{
 		appendBinaryStringInfo(out, "│   ", 4);
+		return;
+	}
 }
 
+// Like a real escape_json_key, but without double quotes
 static void
 escape_json_key(StringInfo buf, const char *str)
 {
@@ -134,18 +169,19 @@ jsonb_put_escaped_value(StringInfo out, JsonbValue *scalarVal)
 char *
 JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 {
-	bool		first = true, pending_indent = false;
-	JsonbIterator *it, *forward_it;
-	JsonbValue	v, forward_v;
-	JsonbIteratorToken type = WJB_DONE, forward_type = WJB_DONE;
-	int			level = 0;
-	int			nested_level = 0;
-	int			elem_number = 0;
-	int			array_index_size = ARRAY_SIZE;
-	ArrayLevel	*array_index = palloc0(array_index_size * sizeof(ArrayLevel));
+	bool				pending_indent = false;
+	JsonbIterator	   *it, *forward_it;
+	JsonbValue			v, forward_v;
+	JsonbIteratorToken	type = WJB_DONE,
+					    forward_type = WJB_DONE;
+	int					level = 0;			// current nesting level
+	int					nested_level = 0;	// current subnesting level inside an array
+	int					elem_number = 0;
+	int					indent_info_depth = ARRAY_SIZE;
+	IndentInfo		   *indent_info = palloc0(indent_info_depth * sizeof(IndentInfo));
 
-	bool		redo_switch = false;
-	int			j;
+	bool				redo_switch = false;
+	int					j;
 
 	if (out == NULL)
 		out = makeStringInfo();
@@ -161,7 +197,7 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 		redo_switch = false;
 		if (pending_indent)
 		{
-			add_indent(out, NOT_ATTACH, level, array_index);
+			add_indent(out, NOT_ATTACH, level, indent_info);
 			pending_indent = false;
 		}
 
@@ -169,6 +205,8 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 		{
 			case WJB_BEGIN_ARRAY:
 
+				// clone the iterator to be able to go in the future,
+				// and get some requited information
 				memcpy(forward_it, it, sizeof(JsonbIterator));
 				forward_it->parent = palloc(sizeof(JsonbIterator));
 				memcpy(forward_it->parent, it->parent, sizeof(JsonbIterator));
@@ -191,79 +229,65 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 				}
 
 				appendStringInfo(out, " [%d elements]", v.val.array.nElems);
-				first = true;
-
-				/*if (v.val.array.nElems > 0)*/
-					/*pending_indent = true;*/
 
 				level++;
 
-				if (level >= array_index_size)
+				if (level >= indent_info_depth)
 				{
-					array_index_size *= 2;
-					array_index = repalloc(array_index, array_index_size * sizeof(ArrayLevel));
-					for (j = array_index_size / 2; j < array_index_size; j++)
+					indent_info_depth *= 2;
+					indent_info = repalloc(indent_info, indent_info_depth * sizeof(IndentInfo));
+					for (j = indent_info_depth / 2; j < indent_info_depth; j++)
 					{
-						array_index[j].index = 0;
-						array_index[j].length = 0;
-						array_index[j].type = 0;
-						array_index[j].elem_number = 0;
+						indent_info[j].index = 0;
+						indent_info[j].length = 0;
+						indent_info[j].type = 0;
+						indent_info[j].elem_number = 0;
 					}
 				}
 
-				array_index[level].index = 1;
-				array_index[level].length = v.val.array.nElems;
-				array_index[level].type = ARRAY_TYPE;
-				array_index[level].elem_number = elem_number;
+				indent_info[level].index = 1;
+				indent_info[level].length = v.val.array.nElems;
+				indent_info[level].type = ARRAY_TYPE;
+				indent_info[level].elem_number = elem_number;
 				break;
 			case WJB_BEGIN_OBJECT:
-				if (array_index[level].index != 0 && array_index[level].type == ARRAY_TYPE)
+				if (indent_info[level].index != 0 && indent_info[level].type == ARRAY_TYPE)
 				{
-					add_indent(out, NOT_ATTACH, level, array_index);
-					add_indent(out, ATTACH, level, array_index);
-					appendStringInfo(out, "# %d", array_index[level].index);
-					array_index[level].index += 1;
+					add_indent(out, NOT_ATTACH, level, indent_info);
+					add_indent(out, ATTACH, level, indent_info);
+					appendStringInfo(out, "# %d", indent_info[level].index);
+					indent_info[level].index += 1;
 				}
 
-				first = true;
 				level++;
-				if (level >= array_index_size)
+				if (level >= indent_info_depth)
 				{
-					array_index_size *= 2;
-					array_index = repalloc(array_index, array_index_size * sizeof(ArrayLevel));
-					for (j = array_index_size / 2; j < array_index_size; j++)
+					indent_info_depth *= 2;
+					indent_info = repalloc(indent_info, indent_info_depth * sizeof(IndentInfo));
+					for (j = indent_info_depth / 2; j < indent_info_depth; j++)
 					{
-						array_index[j].index = 0;
-						array_index[j].length = 0;
-						array_index[j].type = 0;
-						array_index[j].elem_number = 0;
+						indent_info[j].index = 0;
+						indent_info[j].length = 0;
+						indent_info[j].type = 0;
+						indent_info[j].elem_number = 0;
 					}
 				}
 
-				array_index[level].index = 1;
-				array_index[level].length = v.val.object.nPairs;
-				array_index[level].type = OBJECT_TYPE;
+				indent_info[level].index = 1;
+				indent_info[level].length = v.val.object.nPairs;
+				indent_info[level].type = OBJECT_TYPE;
 
 				break;
 			case WJB_KEY:
-				array_index[level].index += 1;
+				indent_info[level].index += 1;
 
-				if (first)
-					add_indent(out, NOT_ATTACH, level, array_index);
-
-				first = true;
-
-				add_indent(out, ATTACH, level, array_index);
+				add_indent(out, ATTACH, level, indent_info);
 
 				/* json rules guarantee this is a string */
 				jsonb_put_escaped_value(out, &v);
 
 				type = JsonbIteratorNext(&it, &v, false);
-				if (type == WJB_VALUE)
-				{
-					first = false;
-				}
-				else
+				if (type != WJB_VALUE)
 				{
 					Assert(type == WJB_BEGIN_OBJECT || type == WJB_BEGIN_ARRAY);
 
@@ -276,25 +300,21 @@ JsonbToCStringTree(StringInfo out, JsonbContainer *in, int estimated_len)
 				}
 				break;
 			case WJB_ELEM:
-				array_index[level].index += 1;
-
-				first = false;
+				indent_info[level].index += 1;
 
 				break;
 			case WJB_END_ARRAY:
 				if (v.val.array.nElems > 0)
-					add_indent(out, SKIP, level, array_index);
+					add_indent(out, SKIP, level, indent_info);
 
 				level--;
-				first = false;
 				break;
 			case WJB_END_OBJECT:
 				level--;
 
-				if (array_index[level].index == 0)
+				if (indent_info[level].index == 0)
 					pending_indent = true;
 
-				first = false;
 				break;
 			default:
 				elog(ERROR, "unknown jsonb iterator token type");
